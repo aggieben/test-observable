@@ -94,6 +94,24 @@ type MatchRecord =
                     JProperty("price", this.price),
                     JProperty("side", this.side))
 
+type OpenRecord =
+    { side: string
+      price: decimal
+      order_id: string
+      remaining_size: decimal
+      product_id: string
+      sequence: int64
+      time: DateTime }
+    with
+        member this.GetJObject() =
+            JObject(JProperty("side", this.side),
+                    JProperty("price", this.price),
+                    JProperty("order_id", this.order_id),
+                    JProperty("remaining_size", this.remaining_size),
+                    JProperty("product_id", this.product_id),
+                    JProperty("sequence", this.sequence),
+                    JProperty("time", this.time))
+
 type GdaxFeedMessage =
     | Subscribe of SubscribeRecord
     | HeartbeatCntl of HeartbeatCntlRecord
@@ -101,44 +119,62 @@ type GdaxFeedMessage =
     | Received of ReceivedRecord
     | Done of DoneRecord
     | Match of MatchRecord
+    | Open of OpenRecord
 
 let deserializeMsg msg =
-    let jo = JObject.Parse(msg)
-    match string jo.["type"] with
-    | "heartbeat" -> Heartbeat { sequence = int64 jo.["sequence"]
-                                 last_trade_id = int64 jo.["last_trade_id"]
-                                 product_id = string jo.["product_id"]
-                                 time = DateTime.Parse(string jo.["time"]) }
-                                 
-    | "received" -> Received { time = DateTime.Parse(string jo.["time"])
+    // let correlation = Guid.NewGuid()
+    // printfn "deserialize start [%A]" correlation
+    try 
+        let jo = JObject.Parse(msg)
+        let result =
+            match string jo.["type"] with
+            | "heartbeat" -> Heartbeat { sequence = int64 jo.["sequence"]
+                                         last_trade_id = int64 jo.["last_trade_id"]
+                                         product_id = string jo.["product_id"]
+                                         time = DateTime.Parse(string jo.["time"]) }
+                                         
+            | "received" -> Received { time = DateTime.Parse(string jo.["time"])
+                                       product_id = string jo.["product_id"]
+                                       sequence = int64 jo.["sequence"]
+                                       order_id = string jo.["order_id"]
+                                       funds = string jo.["funds"]
+                                       side = string jo.["side"]
+                                       order_type = string jo.["order_type"] }
+
+            | "done" -> Done { time = DateTime.Parse(string jo.["time"])
                                product_id = string jo.["product_id"]
                                sequence = int64 jo.["sequence"]
+                               price = decimal jo.["price"]
                                order_id = string jo.["order_id"]
-                               funds = string jo.["funds"]
+                               reason = string jo.["reason"]
                                side = string jo.["side"]
-                               order_type = string jo.["order_type"] }
-
-    | "done" -> Done { time = DateTime.Parse(string jo.["time"])
-                       product_id = string jo.["product_id"]
-                       sequence = int64 jo.["sequence"]
-                       price = decimal jo.["price"]
-                       order_id = string jo.["order_id"]
-                       reason = string jo.["reason"]
-                       side = string jo.["side"]
-                       remaining_size = decimal jo.["remaining_size"]
-                       }
-                               
-    | "match" -> Match { trade_id = int64 jo.["trade_id"]
-                         sequence = int64 jo.["sequence"]
-                         maker_order_id = string jo.["maker_order_id"]
-                         taker_order_id = string jo.["taker_order_id"]
-                         time = DateTime.Parse(string jo.["time"])
-                         product_id = string jo.["product_id"]
-                         size = decimal jo.["size"]
-                         price = decimal jo.["price"]
-                         side = string jo.["side"] }
-                         
-    | other -> failwith (sprintf "unrecognized message '%s'" other) 
+                               remaining_size = decimal jo.["remaining_size"]
+                               }
+                                       
+            | "match" -> Match { trade_id = int64 jo.["trade_id"]
+                                 sequence = int64 jo.["sequence"]
+                                 maker_order_id = string jo.["maker_order_id"]
+                                 taker_order_id = string jo.["taker_order_id"]
+                                 time = DateTime.Parse(string jo.["time"])
+                                 product_id = string jo.["product_id"]
+                                 size = decimal jo.["size"]
+                                 price = decimal jo.["price"]
+                                 side = string jo.["side"] }
+            | "open" -> Open { side = string jo.["side"]
+                               price = decimal jo.["price"]
+                               order_id = string jo.["order_id"]
+                               remaining_size = decimal jo.["remaining_size"]
+                               product_id = string jo.["product_id"]
+                               sequence = int64 jo.["sequence"]
+                               time = DateTime.Parse(string jo.["time"]) }
+                                 
+            | other -> failwith (sprintf "unrecognized message '%s'" other) 
+        // printfn "deserialize end [%A] result = %A" correlation result
+        result
+    with 
+        | ex -> 
+            printfn "ERROR: %A" ex
+            reraise()
 
 let serializeMsg msg =
     let caseName = GetUnionCaseName msg
@@ -150,6 +186,7 @@ let serializeMsg msg =
     | Received (payload) -> jo.Merge(payload.GetJObject())
     | Done (payload) -> jo.Merge(payload.GetJObject())
     | Match (payload) -> jo.Merge(payload.GetJObject())
+    | Open (payload) -> jo.Merge(payload.GetJObject())
     jo.ToString(Newtonsoft.Json.Formatting.None)
 
 let simulateFeed (simulation:string) =
@@ -171,7 +208,6 @@ let simulateFeed (simulation:string) =
     (task, simulationEvent.Publish)
 
 let isDone msg =
-    printfn "isDone"
     match msg with
     | Done _ -> true
     | _ -> false
@@ -181,12 +217,10 @@ let main argv =
     
     let feedProc, feedStream = simulateFeed argv.[0]
 
-    let msgStream = feedStream |> Observable.map deserializeMsg
-
-    msgStream 
-    |> Observable.filter isDone
-    |> Observable.subscribe (fun d -> printfn "%A" d)
-    |> ignore
+    let msgStream = feedStream 
+                    |> Observable.map deserializeMsg
+                    |> Observable.filter isDone
+                    |> Observable.subscribe (fun d -> printfn "%A" d)
 
     Async.RunSynchronously feedProc
 
